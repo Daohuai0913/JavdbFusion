@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavdbEmbySkin x Fusion (Emby-Jellyfin Jump + Trailer + Magnet Suite)
 // @namespace    com.local.javdbemby
-// @version      7.331-fusion
+// @version      7.339-fusion
 // @connect      jdforrepam.com
 // @connect      c0.jdbstatic.com
 // @connect      jdbstatic.com
@@ -25,7 +25,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
-// @run-at       document-idle
+// @run-at       document-start
 // @license      MIT
 // ==/UserScript==
 
@@ -46,19 +46,57 @@
     return;
   }
 
+  // 旧版会把 daily ranking 误识别为 TOP250 并留下 #top250。
+  // 在任何页面重构发生前清理这个过期标记，避免首屏直接进入错误面板。
+  if (/^\/rankings\/movies(?:\/|$)/.test(location.pathname) && location.hash === '#top250') {
+    try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) {}
+  }
+
   /* =======================================================================
    * 元素级 Referrer 免疫守卫：根治 c0.jdbstatic.com 等图床 403 Forbidden 防盗链阻断
    * 严禁篡改 document-level <meta name="referrer">，杜绝破坏 Rails 表单 POST、CSRF 与会话校验；
    * 仅针对常规图片元素 (img) 施加 element-level referrerpolicy="no-referrer"，并显式排除验证码图片。
    * ===================================================================== */
-  function ensureImageNoReferrer() {
+  // 在 document-start 提前遮住原生页面，等皮肤结构与样式准备好后再显示，避免刷新时闪出原生布局。
+  const SKIN_BOOT_STYLE_ID = 'javdb-emby-boot-hide';
+  function beginSkinBoot() {
     try {
-      // 自愈清理：若页面存在之前注入或残留的 no-referrer meta 标签，就地拔除以恢复同源 Referer
-      const meta = document.querySelector('meta[name="referrer"][content="no-referrer"]');
-      if (meta && meta.parentNode) meta.parentNode.removeChild(meta);
+      if (localStorage.getItem('javdbEmbyEnabled') === '0') return;
+      const root = document.documentElement;
+      if (!root) return;
+      root.classList.add('emby-skin-pending');
+      if (!document.getElementById(SKIN_BOOT_STYLE_ID)) {
+        const style = document.createElement('style');
+        style.id = SKIN_BOOT_STYLE_ID;
+        style.textContent = 'html.emby-skin-pending body{visibility:hidden!important}';
+        (document.head || root).appendChild(style);
+      }
+      setTimeout(clearSkinBoot, 10000);
+    } catch (e) {}
+  }
+  function clearSkinBoot() {
+    try {
+      if (document.documentElement) document.documentElement.classList.remove('emby-skin-pending');
+      const style = document.getElementById(SKIN_BOOT_STYLE_ID);
+      if (style) style.remove();
+    } catch (e) {}
+  }
+  if (document.documentElement) beginSkinBoot();
+  else document.addEventListener('readystatechange', beginSkinBoot, { once: true });
+  function ensureImageNoReferrer(scope) {
+    try {
+      const root = scope || document;
+      if (!scope) {
+        // 初始化时清理旧 meta；之后仅处理观察到的新插入节点。
+        const meta = document.querySelector('meta[name="referrer"][content="no-referrer"]');
+        if (meta && meta.parentNode) meta.parentNode.removeChild(meta);
+      } else if (root.nodeType === 1 && root.matches && root.matches('meta[name="referrer"][content="no-referrer"]')) {
+        root.remove();
+      }
 
-      // 确保页面所有图片 referrerpolicy 均为 no-referrer，杜绝防盗链 403 阻断（排除图形验证码）
-      const imgs = document.images || document.querySelectorAll('img');
+      // 初始化扫描全页；常驻观察器只扫描新插入节点，避免每次 DOM 变化遍历所有图片。
+      const imgs = root.nodeType === 9 ? (root.images || root.querySelectorAll('img')) :
+        (root.nodeType === 1 ? (root.matches('img') ? [root] : root.querySelectorAll('img')) : []);
       for (let i = 0; i < imgs.length; i++) {
         const img = imgs[i];
         if (img.classList && (img.classList.contains('rucaptcha-image') || img.closest('.rucaptcha-image, #rucaptcha'))) {
@@ -72,7 +110,7 @@
     } catch (e) {}
   }
   ensureImageNoReferrer();
-  var VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '7.331';
+  var VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '7.339';
   var tabHome = null, tabFav = null, favPanel = null;
   var tabGallery = null, galleryPanel = null;
   var tabTop250 = null, top250Panel = null;
@@ -7216,10 +7254,15 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     }
     function register(el) {
       if (!el || regs.has(el)) return;
-      var reg = { raf: 0, mo: null, imgH: null };
+      var reg = { raf: 0, mo: null, imgH: null, imgTimer: 0 };
       reg.mo = new MutationObserver(function () { schedule(el); });
       reg.mo.observe(el, { childList: true, subtree: true });
-      reg.imgH = function (e) { if (e.target && e.target.tagName === 'IMG') schedule(el); };
+      // 一批封面通常会在短时间内陆续 load；合并这些事件，避免每张图都触发整列重排。
+      reg.imgH = function (e) {
+        if (!e.target || e.target.tagName !== 'IMG') return;
+        if (reg.imgTimer) clearTimeout(reg.imgTimer);
+        reg.imgTimer = setTimeout(function () { reg.imgTimer = 0; schedule(el); }, 70);
+      };
       el.addEventListener('load', reg.imgH, true);
       regs.set(el, reg);
       schedule(el);
@@ -7229,6 +7272,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       if (!reg) return;
       if (reg.mo) reg.mo.disconnect();
       if (reg.imgH) el.removeEventListener('load', reg.imgH, true);
+      if (reg.imgTimer) clearTimeout(reg.imgTimer);
       if (reg.raf) cancelAnimationFrame(reg.raf);
       regs.delete(el);
     }
@@ -8329,7 +8373,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     { id: 'otherSite', name: '外部播放站点', desc: '开启后在番号详情页提供多源跳转播放；关闭时默认直接调用 JAVDB 官方播放（会员免跳转）', default: true },
     { id: 'infoSites', name: '番号信息站点', desc: '开启后在番号后面以网站LOGO形式展示 JAVBUS、JAVLib、FANZA動画、javtxt 快捷跳转入口', default: true },
     { id: 'infiniteScroll', name: '无限加载', desc: '浏览列表时滚动到底部自动加载下一页，免去手动点击翻页', default: true },
-    { id: 'reviewListInfinite', name: '绕过JAVDB限制', desc: '免VIP/登录畅享完整评论、相关清单原位展开，以及TOP250与热播榜单全量浏览', default: false },
+    { id: 'reviewListInfinite', name: '绕过JAVDB限制', desc: '为非 VIP 账号扩展评论与相关清单浏览；不控制 TOP250 或热播榜界面', default: false },
     { id: 'actressInfo', name: '女优信息与收藏标记', desc: '查询女优现役/退役状态、年龄、身高、三围等体检数据，并控制女优头像红心收藏标记的显示', default: true },
     { id: 'gfriendsAvatar', name: '演员头像高清替换', desc: '开启后优先从高清头像库匹配演员头像（男女演员均支持），未匹配则平滑回退 JAVDB 官方头像', default: true },
     { id: 'quickStatusPreview', name: '状态快捷标记和预览图', desc: '在作品封面提供「想看/已看评分」快捷标记按钮，以及预览大图嗅探抓取与画廊浮层', default: false }
@@ -9176,7 +9220,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
 
   /* =======================================================================
    * TOP250 与热播榜单管理器 (Top250ViewManager)
-   * 归属于「绕过JAVDB限制」插件，免 VIP 畅享官方 TOP250 与热播榜单
+   * 使用官方 VIP 会话与榜单数据；评论扩展开关不控制本榜单界面
    * ===================================================================== */
   const Top250ViewManager = (function () {
     const API_BASE = 'https://jdforrepam.com/api';
@@ -9361,10 +9405,17 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         if (cached && cached.length) return { success: 1, data: { movies: cached }, fromCache: true };
       }
 
+      const token = getAuthToken();
+      if (!token) {
+        const movies = await fetchOfficialTop(handleType, typeValue);
+        for (let p = 1; p <= 5; p++) {
+          await setCached('top_' + handleType + '_' + typeValue + '_p' + p, movies.slice((p - 1) * 50, p * 50));
+        }
+        return { success: 1, data: { movies: movies.slice((page - 1) * 50, page * 50) }, fromJavdbSession: true };
+      }
       const url = API_BASE + '/v1/movies/top?start_rank=1&type=' + encodeURIComponent(handleType) +
                   '&type_value=' + encodeURIComponent(typeValue) +
                   '&ignore_watched=false&page=' + page + '&limit=50';
-      const token = getAuthToken();
       const sig = getSignature();
       const headers = { 'jdSignature': sig };
       if (token) headers['authorization'] = 'Bearer ' + token;
@@ -9373,10 +9424,59 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       const res = JSON.parse(text);
       if (res.success === 1 && res.data && Array.isArray(res.data.movies)) {
         await setCached(cacheKey, res.data.movies);
+        return res;
       }
-      return res;
+      try {
+        const officialMovies = await fetchOfficialTop(handleType, typeValue);
+        for (let p = 1; p <= 5; p++) {
+          await setCached('top_' + handleType + '_' + typeValue + '_p' + p, officialMovies.slice((p - 1) * 50, p * 50));
+        }
+        return { success: 1, data: { movies: officialMovies.slice((page - 1) * 50, page * 50) }, fromJavdbSession: true };
+      } catch (e) {
+        return res;
+      }
     }
 
+    // VIP 用户直接使用当前 JavDB 网页登录会话读取官方 TOP250，不要求单独的移动端 Token。
+    async function fetchOfficialTop(handleType, typeValue) {
+      let url = location.origin + '/rankings/top';
+      if (handleType === 'video_type' && typeValue) url += '?t=' + encodeURIComponent(typeValue);
+      else if (handleType === 'year' && typeValue) url += '?t=' + encodeURIComponent('y' + typeValue);
+      const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+      if (!response.ok) throw new Error('JAVDB 官方 TOP250 请求失败 (' + response.status + ')');
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const items = Array.from(doc.querySelectorAll('.movie-list .item'));
+      const movies = items.map(function (item, index) {
+        const link = item.querySelector('a[href^="/v/"]');
+        if (!link) return null;
+        const match = (link.getAttribute('href') || '').match(/\/v\/([^/?#]+)/);
+        if (!match) return null;
+        const titleEl = item.querySelector('.video-title, .title');
+        const titleText = (titleEl ? titleEl.textContent : link.textContent || '').replace(/\s+/g, ' ').trim();
+        const code = (item.querySelector('.video-title strong, strong') || {}).textContent || (titleText.match(/\b[A-Z0-9]+-\d+\b/i) || [''])[0];
+        const title = titleText.replace(code, '').trim();
+        const img = item.querySelector('.cover img, img');
+        const cover = img ? (img.getAttribute('data-src') || img.getAttribute('src') || '') : '';
+        const rankText = (item.querySelector('.top250-rank-badge, .rank, .tag.is-dark') || {}).textContent || '';
+        const rankMatch = rankText.match(/\d+/);
+        const scoreText = (item.querySelector('.score .value, .score') || {}).textContent || '';
+        const scoreMatch = scoreText.match(/[0-5](?:\.\d+)?/);
+        const date = ((item.querySelector('.meta, .time') || {}).textContent || '').trim();
+        const hasCnsub = /中字|字幕/.test(item.textContent || '');
+        return {
+          id: match[1], code: String(code).trim(), number: String(code).trim(),
+          title: title || titleText, origin_title: title || titleText,
+          detailHref: '/v/' + match[1], coverThumb: cover, coverLarge: cover,
+          thumb_url: cover, cover_url: cover, date: date, release_date: date,
+          score: scoreMatch ? parseFloat(scoreMatch[0]) : 0,
+          has_cnsub: hasCnsub, magnets_count: 0,
+          _topRank: rankMatch ? parseInt(rankMatch[0], 10) : index + 1,
+          awards: [{ name: 'JavDB 影片TOP250', rank: rankMatch ? parseInt(rankMatch[0], 10) : index + 1 }]
+        };
+      }).filter(Boolean);
+      if (!movies.length) throw new Error('未能从 JAVDB 官方页面读取榜单；请确认当前账号已登录且有 TOP250 访问权限');
+      return movies;
+    }
     // 异步评分加载与持久化系统（复用顶层共享 scoreMemCache）
     let scoreQueueRunning = false;
     const scoreQueue = [];
@@ -10009,7 +10109,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       if (token) {
         return '<span class="material-symbols-outlined" style="font-size:14px;color:#34d399;">verified_user</span> 已登录凭证 <span style="font-size:10px;opacity:.7;">(点此重登)</span>';
       }
-      return '<span class="material-symbols-outlined" style="font-size:14px;color:#f59e0b;">lock_open</span> 未登录凭证 <span style="font-size:10px;opacity:.7;">(点此登录解锁TOP250)</span>';
+      return '<span class="material-symbols-outlined" style="font-size:14px;color:#34d399;">verified_user</span> 使用 JAVDB 网页登录态';
     }
 
     function updateAuthBadge() {
@@ -10037,14 +10137,8 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     }
 
     async function loadData() {
+      if (!currentContainer) return;
       const mySeq = ++top250LoadSeq;
-      if (typeof isPluginEnabled === 'function' && !isPluginEnabled('reviewListInfinite') && !isJavdbVipUser()) {
-        const listEl = currentContainer ? currentContainer.querySelector('#t250-movie-list') : null;
-        if (listEl) {
-          listEl.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:80px 0;color:#94a3b8;font-size:15px;">「绕过JAVDB限制」插件当前处于禁用状态，请在设置中开启（或登录 JAVDB VIP 会员账号）后再使用 TOP250 与热播榜功能。</div>';
-        }
-        return;
-      }
       if (isFetching) return;
       isFetching = true;
 
@@ -10060,30 +10154,6 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
           cachedMovies = movies || [];
           renderMoviesList(cachedMovies);
         } else {
-          // TOP250 未登录引导
-          if (!getAuthToken()) {
-            if (mySeq !== top250LoadSeq) return;
-            if (listEl) {
-              listEl.innerHTML =
-                '<div style="grid-column:1/-1;text-align:center;padding:70px 20px;color:#e2e8f0;">' +
-                  '<div style="font-size:18px;font-weight:700;margin-bottom:10px;color:#fed368;">🏆 TOP250 需验证 JAVDB 账号凭据</div>' +
-                  '<div style="font-size:13px;color:#94a3b8;margin-bottom:20px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.6;">TOP250 榜单由移动端接口提供。输入免费普通 JAVDB 账号或粘贴已有 Token 即可免 VIP 畅享全部 250 部影片。</div>' +
-                  '<div style="display:flex;justify-content:center;gap:12px;">' +
-                    '<button type="button" id="t250-prompt-login-btn" style="background:#00a4dc;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">立即登录 / 粘贴 Token</button>' +
-                    '<button type="button" id="t250-prompt-playback-btn" style="background:rgba(255,255,255,.1);color:#fff;border:none;padding:10px 20px;border-radius:8px;font-size:14px;cursor:pointer;">先看免登录热播榜</button>' +
-                  '</div>' +
-                '</div>';
-              const pBtn = listEl.querySelector('#t250-prompt-login-btn');
-              if (pBtn) pBtn.addEventListener('click', function () { showLoginModal(function () { loadData(); }); });
-              const pbBtn = listEl.querySelector('#t250-prompt-playback-btn');
-              if (pbBtn) pbBtn.addEventListener('click', function () { switchMode('playback'); });
-            }
-            isFetching = false;
-            updateAuthBadge();
-            updateCacheBadge();
-            return;
-          }
-
           const res = await fetchFullTop(state.handleType, state.typeValue, function (cur, total) {
             if (mySeq !== top250LoadSeq) return;
             if (listEl) {
@@ -10303,9 +10373,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         return;
       }
 
-      const isPlayback = state.mode === 'playback';
-
-      if (isPlayback) {
+      // TOP250 and playback share the same card renderer; only their data and filters differ.
         // 热播榜单保持 JAVDB 原样式与轻量渲染 (保持原样)
         let html = '';
         filtered.forEach(function (m, idx) {
@@ -10356,6 +10424,8 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
 
         listEl.innerHTML = html;
 
+        if (typeof window.__javdbFusionScanListBadges === 'function') window.__javdbFusionScanListBadges();
+
         listEl.querySelectorAll('.item .box').forEach(function (box) {
           const itemEl = box.closest('.item');
           const code = itemEl ? (itemEl.dataset.code || '') : '';
@@ -10364,46 +10434,6 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
           box.style.setProperty('--mz-ar', String(masonryAspect(src || code, code)));
           if (typeof attachCard3D === 'function') attachCard3D(box);
         });
-      } else {
-        // TOP250 完整卡片：直接复用 FAVUI.buildCard，保证与收藏夹 100% 同步，零重复代码，天然去除磁链标签
-        listEl.innerHTML = '';
-        const frag = document.createDocumentFragment();
-        filtered.forEach(function (m, idx) {
-          const rank = m._topRank || (idx + 1);
-          m._topRank = rank;
-          if (!m.awards || !m.awards.length) {
-            m.awards = [{ name: getCurrentBoardAwardName(state), rank: rank }];
-          }
-          if (!m.detailHref) m.detailHref = '/v/' + m.id;
-          if (!m.code) m.code = m.number || '';
-          if (!m.coverThumb && !m.coverLarge) {
-            m.coverThumb = updateImgServer(m.thumb_url || m.cover_url || '');
-            m.coverLarge = updateImgServer(m.cover_url || m.thumb_url || '');
-          } else {
-            if (m.coverThumb) m.coverThumb = updateImgServer(m.coverThumb);
-            if (m.coverLarge) m.coverLarge = updateImgServer(m.coverLarge);
-          }
-          if (!m.coverThumb && m.coverLarge) m.coverThumb = m.coverLarge;
-          if (!m.coverLarge && m.coverThumb) m.coverLarge = m.coverThumb;
-          if (!m.date) m.date = m.release_date || '';
-          if (!m.title) m.title = m.origin_title || '';
-          if (!m.rating && (m.score != null || scoreMemCache.has(m.id))) {
-            const sInfo = scoreMemCache.get(m.id);
-            const score = sInfo ? sInfo.score : (parseFloat(m.score) || 0);
-            const watched = sInfo ? sInfo.watchedCount : (m.watched_count || 0);
-            m.rating = {
-              score: score,
-              count: watched,
-              text: (score > 0 ? score.toFixed(1) + '分' : '0.0分') + (watched ? '，由' + watched + '人評價' : '')
-            };
-          }
-
-          if (typeof FAVUI !== 'undefined' && typeof FAVUI.buildCard === 'function') {
-            frag.appendChild(FAVUI.buildCard(m));
-          }
-        });
-        listEl.appendChild(frag);
-      }
 
       if (layout === 'masonry') {
         try {
@@ -10514,7 +10544,9 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       // 账号凭证状态点击
       const authBadge = panel.querySelector('#t250-auth-badge');
       if (authBadge) {
+        if (!getAuthToken()) authBadge.style.cursor = 'default';
         authBadge.addEventListener('click', function () {
+          if (!getAuthToken()) return;
           showLoginModal(function () {
             if (state.mode === 'top') {
               abortSync();
@@ -10584,9 +10616,6 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
 
     function mount(panel) {
       currentContainer = panel;
-      if (!getAuthToken() && state.mode === 'top') {
-        state.mode = 'playback';
-      }
       panel.innerHTML =
         '<div class="top250-wrap">' +
           '<div class="top250-header">' +
@@ -10664,9 +10693,8 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
 
     // 5. JAVDB 原生官方页面拦截（仅在原生模式且主动访问收费热播页面时就地解除限制）
     function hookNativePage() {
-      if (typeof isPluginEnabled === 'function' && !isPluginEnabled('reviewListInfinite') && !isJavdbVipUser()) return;
       const isPlans = location.pathname.startsWith('/plans');
-      const isTop = /^\/rankings\/(movies|top)(\/|\?|$)/.test(location.pathname) || (location.pathname.startsWith('/advanced_search') && location.search.includes('handleTop'));
+      const isTop = /^\/rankings\/top(\/|\?|$)/.test(location.pathname) || (location.pathname.startsWith('/advanced_search') && location.search.includes('handleTop'));
       const isPlayback = /^\/rankings\/playback(\/|\?|$)/.test(location.pathname) || (isPlans && document.referrer && document.referrer.includes('playback')) || (location.pathname.startsWith('/advanced_search') && location.search.includes('handlePlayback'));
       if (!isTop && !isPlayback && !isPlans) return;
 
@@ -15166,6 +15194,20 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
    * ===================================================================== */
   function hideJavdbAds() {
     if (!document.documentElement.classList.contains('emby-skin')) return;
+    const routeKey = location.pathname + location.search;
+    const now = Date.now();
+    if (hideJavdbAds._routeKey === routeKey && now - (hideJavdbAds._lastScan || 0) < 250) {
+      if (!hideJavdbAds._pending) {
+        hideJavdbAds._pending = setTimeout(function () {
+          hideJavdbAds._pending = 0;
+          hideJavdbAds();
+        }, Math.max(1, 251 - (now - hideJavdbAds._lastScan)));
+      }
+      return;
+    }
+    if (hideJavdbAds._pending) { clearTimeout(hideJavdbAds._pending); hideJavdbAds._pending = 0; }
+    hideJavdbAds._routeKey = routeKey;
+    hideJavdbAds._lastScan = now;
     const adSelectors = [
       '.moj-content', '.moj-container', '.moj-banner', '.moj-wrap', '[class*="moj-"]',
       '.sda-content', '.sda-container', '.sda-banner', '.sda-wrap', '[class*="sda-"]', '[class*="-sda"]',
@@ -15196,7 +15238,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     // 根据「純推廣 / 纯推广 / 廣告 / 推广 / 赞助商」文本特征精准识别并隐藏广告容器
     try {
       const PROMO_RE = /^(?:純推廣|纯推广|廣告|推广|赞助商)$/;
-      document.querySelectorAll('.tag, .badge, span, div, a').forEach(function (el) {
+      document.querySelectorAll('.tag, .badge, [data-ad], [class*="moj-"], [class*="sda-"]').forEach(function (el) {
         const t = (el.textContent || '').trim();
         if (PROMO_RE.test(t)) {
           const card = el.closest('.moj-content, [class*="moj-"], .sda-content, [class*="sda-"], .item, .box, .notification, .message, .panel, .columns, div') || el;
@@ -25070,7 +25112,9 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       try { hideJavdbAds(); } catch (e) {}
       try { restructureCurrent(); } catch (e) { log('restructureCurrent 异常: ' + e.message); }
       try { syncQuickStatusPreviewUI(); } catch (e) {}
+      clearSkinBoot();
     } else {
+      clearSkinBoot();
       document.documentElement.classList.remove('emby-skin');
       if (skinEl && skinEl.parentNode) { skinEl.parentNode.removeChild(skinEl); skinEl = null; }
       removeEmbyDOM();
@@ -25141,7 +25185,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     '#emby-gallery-panel,#emby-top250-panel,#emby-df-preview,#emby-df-scrim,#emby-search-modal,#emby-settings-panel,#jhs-settings-mask,' +
     '#emby-quick-settings-popover,#jhs-wd-list-modal,#emby-compact-bar,#emby-detail-root,#emby-detail-bg,' +
     '#emby-detail-scrim,#emby-backtop,#emby-toast,#javdb-emby-toggle,.emby-home-tabs,' +
-    '.emby-morph-overlay,.efav-modal-mask,.emby-card-shine,.emby-note-tip,#efav-gallery-lb,#jhs-infinite-loader,.jhs-infinite-loader';
+    '.emby-morph-overlay,.efav-modal-mask,.emby-card-shine,.emby-note-tip,.jf-rank-actions,.jf-rank-action,#efav-gallery-lb,#jhs-infinite-loader,.jhs-infinite-loader';
   // 全部变化都落在皮肤子树内 → true（跳过调度）。任一记录的目标或新增节点在皮肤子树外 → false（相关）。
   // 纯移除类记录（无 addedNodes）只看 target：javdb 原生区移除属于相关，面板内移除属于皮肤自管。
   function allInsideSkinChrome(muts) {
@@ -25162,14 +25206,38 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     }
     return true;
   }
+  function hasRelevantPageMutation(muts) {
+    const pageSelector = '.video-detail, .movie-list, .emby-row';
+    for (let i = 0; i < muts.length; i++) {
+      const m = muts[i];
+      let target = m.target;
+      if (target && target.nodeType === 3) target = target.parentElement;
+      if (target && target.nodeType === 1 && target.closest && target.closest(SKIN_CHROME_SEL)) continue;
+      if (target && target.nodeType === 1 && target.closest && target.closest(pageSelector)) return true;
+      const added = m.addedNodes || [];
+      for (let j = 0; j < added.length; j++) {
+        const n = added[j];
+        if (!n || n.nodeType !== 1 || (n.matches && n.matches(SKIN_CHROME_SEL))) continue;
+        if ((n.matches && n.matches(pageSelector)) || (n.querySelector && n.querySelector(pageSelector))) return true;
+      }
+    }
+    return false;
+  }
   function observeMutations() {
     let timer = null;
     const mo = new MutationObserver(function (muts) {
       // 增量过滤：皮肤自身注入/面板渲染引起的突变直接跳过调度；
-      // 只在 javdb 原生区域发生结构变化时才进入 500ms 防抖重构。
+      // 详情页内容到达后尽快重建，列表页保留较长防抖以合并无限滚动的批量插入。
       if (!enabled) return;
-      ensureImageNoReferrer();
-      if (allInsideSkinChrome(muts)) return;
+      // 只为新增节点设置 referrerpolicy，不在每次突变时重扫 document.images。
+      for (let mi = 0; mi < muts.length; mi++) {
+        const added = muts[mi].addedNodes;
+        for (let ai = 0; added && ai < added.length; ai++) {
+          const node = added[ai];
+          if (node && node.nodeType === 1) ensureImageNoReferrer(node);
+        }
+      }
+      if (allInsideSkinChrome(muts) || !hasRelevantPageMutation(muts)) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(function () {
         try { if (isDetailPage()) autoBlockJavdbTranslate(); } catch (e) {}
@@ -25193,15 +25261,24 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
             try { console.error('[javdb-emby-skin] 增量重建异常：', e); } catch (e2) {}
           }
         }
-      }, 500);
+      }, isDetailPage() ? 90 : 500);
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
 
     // 仅比较 pathname+search：Fancybox 打开预览会改写 location.hash（如 #gallery-1-0），
     // 若比较完整 href 会把「点开灯箱」误判为「切换影片页」而触发整页重建、导致预览区丢失
+    function normalizeRankingHash() {
+      // TOP250 lives at /rankings/top. Remove a stale hash left behind by older
+      // script versions when a client-side navigation lands on /rankings/movies.
+      if (/^\/rankings\/movies(?:\/|$)/.test(location.pathname) && location.hash === '#top250') {
+        try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) {}
+      }
+    }
+    normalizeRankingHash();
     function pageKey() { return location.pathname + location.search; }
     let lastKey = pageKey();
     function checkRouteChange() {
+      normalizeRankingHash();
       const cur = pageKey();
       if (cur !== lastKey) {
         lastKey = cur;
@@ -25222,9 +25299,13 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
               const href = a.getAttribute('href') || '';
               const isPb = href.includes('playback');
               if (enabled) {
+                const isTopRoute = /\/rankings\/top(?:\/|\?|$)/.test(href);
+                // /rankings/top is TOP250; /rankings/movies remains the site's daily/category ranking.
+                if (isTopRoute) { e.preventDefault(); e.stopPropagation(); Top250ViewManager.switchMode('top'); switchTab('top250'); return; }
+                if (!isPb) return;
                 e.preventDefault();
                 e.stopPropagation();
-                Top250ViewManager.switchMode(isPb ? 'playback' : 'top');
+                Top250ViewManager.switchMode('playback');
                 switchTab('top250');
               } else {
                 // 原生模式下，仅拦截被官方收费限制的热播榜单，TOP250 官方榜单天然放行导航
@@ -25246,7 +25327,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
 
           // 若当前直接访问排行榜或被 302 到 /plans 或 /advanced_search
           const isRankPage = location.pathname.startsWith('/plans') ||
-                             /^\/rankings\/(movies|top|playback)(\/|\?|$)/.test(location.pathname) ||
+                             /^\/rankings\/(top|playback)(\/|\?|$)/.test(location.pathname) ||
                              (location.pathname.startsWith('/advanced_search') && (location.search.includes('handlePlayback') || location.search.includes('handleTop')));
           if (isRankPage) {
             try {
@@ -25513,13 +25594,28 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       const base = s.baseUrl.replace(/\/+$/, '');
       return base + (s.type === 'emby' ? '/emby' : '') + path;
     }
-    // Jellyfin 12+ 删除了 api_key 查询参数与 X-Emby-Token 头（一律 401）；
-    // 统一用 Authorization: MediaBrowser Token 头（Emby 4.x 同样兼容）。
+    // Jellyfin 10.11+ 可关闭旧版鉴权头；使用完整 MediaBrowser Authorization 元数据。
+    // Emby 的 API Key 鉴权使用官方支持的 X-Emby-Token。
     function serverHeaders(s) {
-      return { 'Authorization': 'MediaBrowser Token="' + s.apiKey + '"', 'Accept': 'application/json' };
+      const headers = { 'Accept': 'application/json' };
+      if (s.type === 'jellyfin') {
+        headers.Authorization = 'MediaBrowser Client="JavdbFusion", Device="Browser", DeviceId="javdbfusion", Version="1.0.0", Token="' + String(s.apiKey || '').replace(/"/g, '') + '"';
+      } else {
+        headers['X-Emby-Token'] = s.apiKey;
+      }
+      return headers;
     }
     function indexKey(s) { return 'jf_index_' + s.id; }
     function cacheKey(s) { return 'jf_cache_' + s.id; }
+    // Cache parsed indexes for the lifetime of this page. The list observer can
+    // trigger repeated scans; parsing a full-library JSON blob each time stalls UI.
+    const listIndexLookups = new Map();
+    const listCacheLookups = new Map();
+    const listLookupResults = new Map();
+    const listLookupPending = new Map();
+    const listLookupQueue = [];
+    let listLookupActive = 0;
+    let listLookupObserver = null;
     function readIndex(s) {
       try {
         const raw = GM_getValue(indexKey(s), '');
@@ -25528,6 +25624,29 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         if (!obj || !obj.ts || !obj.entries) return null;
         return obj;
       } catch (e) { return null; }
+    }
+    function getListIndexLookup(s) {
+      const key = String(s && s.id || '');
+      if (listIndexLookups.has(key)) return listIndexLookups.get(key);
+      const idx = readIndex(s);
+      const lookup = { entries: Object.create(null), compactEntries: Object.create(null) };
+      if (idx && idx.entries) {
+        lookup.entries = idx.entries;
+        Object.keys(idx.entries).forEach(function (code) {
+          const compact = code.replace(/[-_]/g, '');
+          if (!lookup.compactEntries[compact]) lookup.compactEntries[compact] = idx.entries[code];
+        });
+      }
+      listIndexLookups.set(key, lookup);
+      return lookup;
+    }
+    function getListCacheLookup(s) {
+      const key = String(s && s.id || '');
+      if (listCacheLookups.has(key)) return listCacheLookups.get(key);
+      const source = readCache(s), lookup = Object.create(null);
+      Object.keys(source || {}).forEach(function (code) { lookup[normalizeCode(code)] = source[code]; });
+      listCacheLookups.set(key, lookup);
+      return lookup;
     }
     function readCache(s) {
       try { return JSON.parse(GM_getValue(cacheKey(s), '{}') || '{}'); } catch (e) { return {}; }
@@ -25541,7 +25660,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       const pageSize = 2000;
       let start = 0, total = Infinity, entries = {};
       while (start < total) {
-        const url = apiUrl(s, '/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Name' +
+        const url = apiUrl(s, '/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Name,OriginalTitle,Path' +
           '&StartIndex=' + start + '&Limit=' + pageSize + '&SortBy=SortName');
         const res = await gmReq({ url: url, headers: serverHeaders(s), timeout: 60000 });
         let data;
@@ -25550,14 +25669,22 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         if (typeof (data && data.TotalRecordCount) === 'number') total = data.TotalRecordCount;
         else total = start + items.length;
         for (const it of items) {
-          const code = extractCodeFromText(it && it.Name || '');
-          if (code) entries[normalizeCode(code)] = { id: it.Id, sid: it.ServerId || '' };
+          // Titles, original titles and file paths can carry different release codes.
+          // Index each recognizable alias against the same Jellyfin/Emby item.
+          const sources = [it && it.Name, it && it.OriginalTitle, it && it.Path];
+          for (const source of sources) {
+            const code = extractCodeFromText(source || '');
+            if (code) entries[normalizeCode(code)] = { id: it.Id, sid: it.ServerId || s.serverId || '' };
+          }
         }
         start += items.length;
         if (onProgress) onProgress(Math.min(start, total), total);
         if (!items.length) break;
       }
       GM_setValue(indexKey(s), JSON.stringify({ ts: Date.now(), entries: entries }));
+      listIndexLookups.delete(String(s.id || ''));
+      listCacheLookups.delete(String(s.id || ''));
+      try { if (typeof injectListBadges === 'function') injectListBadges(); } catch (e) {}
       return Object.keys(entries).length;
     }
     // API 搜索（多变体尝试 + 精确匹配）
@@ -25578,6 +25705,74 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         } catch (e) { /* 下一个变体 */ }
       }
       return null;
+    }
+    // Repair index misses lazily for cards near the viewport. Requests are
+    // serialized through a small queue so 250 cards never fan out API calls.
+    function queueListLibraryLookup(code, servers) {
+      const norm = normalizeCode(code);
+      const key = servers.map(function (s) { return s.id; }).join(',') + '|' + norm;
+      if (listLookupResults.has(key)) return Promise.resolve(listLookupResults.get(key));
+      if (listLookupPending.has(key)) return listLookupPending.get(key);
+      let resolveJob;
+      const promise = new Promise(function (resolve) { resolveJob = resolve; });
+      listLookupPending.set(key, promise);
+      listLookupQueue.push({ key: key, code: code, norm: norm, servers: servers, resolve: resolveJob });
+      pumpListLibraryLookups();
+      return promise;
+    }
+    function pumpListLibraryLookups() {
+      while (listLookupActive < 2 && listLookupQueue.length) {
+        const job = listLookupQueue.shift();
+        listLookupActive++;
+        (async function () {
+          let match = null;
+          for (const s of job.servers) {
+            const cached = getListCacheLookup(s)[job.norm];
+            if (cached && cached.ts && Date.now() - cached.ts < CACHE_TTL && cached.id) {
+              match = { s: s, e: { id: cached.id, sid: cached.sid || s.serverId || '' } };
+              break;
+            }
+            const item = await searchItemsApi(s, job.code);
+            if (item && item.Id) {
+              const data = readCache(s);
+              data[job.norm] = { id: item.Id, sid: item.ServerId || s.serverId || '', ts: Date.now() };
+              writeCache(s, data);
+              getListCacheLookup(s)[job.norm] = data[job.norm];
+              match = { s: s, e: { id: item.Id, sid: item.ServerId || s.serverId || '' } };
+              break;
+            }
+          }
+          return match;
+        })().then(function (match) {
+          listLookupResults.set(job.key, match || false);
+          job.resolve(match);
+        }).catch(function () {
+          listLookupResults.set(job.key, false);
+          job.resolve(null);
+        }).finally(function () {
+          listLookupPending.delete(job.key);
+          listLookupActive--;
+          pumpListLibraryLookups();
+        });
+      }
+    }
+    function updateListPlayButton(button, hit, fallbackServer, code) {
+      if (!button) return;
+      const server = hit && hit.s ? hit.s : fallbackServer;
+      if (!server) return;
+      const url = hit
+        ? buildJumpUrl(server, code, { Id: hit.e.id, ServerId: hit.e.sid })
+        : buildJumpUrl(server, code, null);
+      button.className = 'jf-rank-action jf-rank-play jf-lib-play-' + server.type + (hit ? ' jf-lib-hit' : ' jf-lib-search');
+      button.textContent = hit
+        ? '▶ 在 ' + (server.type === 'jellyfin' ? 'Jellyfin' : 'Emby') + ' 播放'
+        : '⌕ 媒体库搜索';
+      button.title = hit ? ('已入库：' + server.name + ' · 点击播放') : ('在 ' + server.name + ' 搜索此番号');
+      button.dataset.href = url;
+      button.onclick = function (e) {
+        e.preventDefault(); e.stopPropagation();
+        try { window.open(button.dataset.href || url, '_blank', 'noopener'); } catch (err) {}
+      };
     }
     // 入库查询：索引 → 条目缓存 → 实时 API（结果写缓存）
     async function checkExists(s, code) {
@@ -25601,15 +25796,16 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       }
       return { hit: false };
     }
-    // 跳转 URL：命中 → 详情深链；否则按模式（搜索页 / 自定义模板）
-    // 路由形态：Emby 与 Jellyfin ≤12.0 用 #!/item / #!/search.html；
-    // Jellyfin 12.1+ 前端重写为 React Router，用 #/details / #/search（旧链接已失效）。
+    // 跳转 URL：命中 → 详情深链；否则按模式（搜索页 / 自定义模板）。
     function buildJumpUrl(s, code, item) {
       const base = s.baseUrl.replace(/\/+$/, '');
-      const ver = parseFloat(s.version || '99'); // 未测试连接过则按最新版处理
-      const jfNewRouter = (s.type === 'jellyfin') && ver >= 12.1;
+      // Jellyfin uses the hash-router deep link in the user's deployed web client.
+      // Keep the same details route across server versions; the legacy #!/item URL
+      // is not handled correctly by many current Jellyfin clients.
+      const jfNewRouter = s.type === 'jellyfin';
       if (item && item.Id) {
-        const sid = item.ServerId ? '&serverId=' + item.ServerId : '';
+        const serverId = item.ServerId || item.sid || s.serverId || '';
+        const sid = serverId ? '&serverId=' + serverId : '';
         if (jfNewRouter) return base + '/web/index.html#/details?id=' + item.Id + sid;
         return base + '/web/index.html#!/item?id=' + item.Id + sid;
       }
@@ -25623,10 +25819,13 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     async function testServer(s) {
       const url = apiUrl(s, '/System/Info');
       const res = await gmReq({ url: url, headers: serverHeaders(s), timeout: 10000 });
+      if (res.status < 200 || res.status >= 300) {
+        return { ok: false, error: 'HTTP ' + res.status + (res.status === 401 ? '（鉴权失败：请确认 API Key、服务器类型及 Jellyfin API Key 权限）' : '') };
+      }
       try {
         const info = JSON.parse(res.responseText);
         return { ok: true, name: info.ServerName || '', version: info.Version || '', serverId: info.Id || '' };
-      } catch (e) { return { ok: false, error: '响应非 JSON' }; }
+      } catch (e) { return { ok: false, error: '响应非 JSON（HTTP ' + res.status + '）' }; }
     }
 
     /* =======================================================================
@@ -25650,8 +25849,10 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       return hit ? hit.text : q;
     }
     // 官方预告片嗅探（javdb 原生 .preview-video-container：a[href mp4] / video source）
-    function getOfficialTrailerUrl() {
+    function getOfficialTrailerUrl(code) {
       try {
+        // 列表预览传入的是另一部影片番号；只有详情页当前番号一致时才复用页面官方预告。
+        if (!isDetailPage() || normalizeCode(currentPageCode()) !== normalizeCode(code)) return null;
         const box = document.querySelector('.preview-video-container');
         if (!box) return null;
         const a = box.querySelector('a[href*=".mp4"], a[href*=".m3u8"]');
@@ -25763,7 +25964,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         sources.push({ url: url, label: label, quality: quality || '', source: source });
       };
       if (TrConf.useOfficial) {
-        const official = getOfficialTrailerUrl();
+        const official = getOfficialTrailerUrl(code);
         if (official) push(official, 'JAVDB 官方预告片', '', 'official');
       }
       if (TrConf.useDmm && /^[A-Z]{2,10}-\d{2,6}$/i.test(code) && !/^FC2-/i.test(code) && code.indexOf('VR-') < 0) {
@@ -26649,30 +26850,100 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     }
     // 列表页入库角标（依赖索引：索引过期/未同步时静默跳过，避免请求风暴）
     function injectListBadges() {
-      if (!isPluginEnabled('fusionMediaLib')) return;
-      if (!GM_getValue('jf_ui_listbadge', true)) return;
-      const servers = getActiveServers();
-      if (!servers.length) return;
-      const idxMaps = [];
-      for (const s of servers) {
-        const idx = readIndex(s);
-        if (idx && (Date.now() - idx.ts) < INDEX_TTL) idxMaps.push({ s: s, entries: idx.entries });
+      const customRankPanel = document.querySelector('#emby-top250-panel.show');
+      const customTopItems = customRankPanel && customRankPanel.querySelector('#t250-movie-list .item');
+      const hasMovieCards = !!document.querySelector('.movie-list .item, .emby-row .item');
+      const showPreview = (hasMovieCards || !!customTopItems) && isPluginEnabled('fusionTrailer');
+      const showLibrary = isPluginEnabled('fusionMediaLib');
+      const showLibraryBadge = showLibrary && GM_getValue('jf_ui_listbadge', true);
+      if (!showPreview && !showLibrary) return;
+      const servers = showLibrary ? getActiveServers() : [];
+      if (!showPreview && !servers.length) return;
+      const items = customRankPanel
+        ? customRankPanel.querySelectorAll('#t250-movie-list .item')
+        : document.querySelectorAll('.movie-list .item, .emby-row .item');
+      if (showLibrary && typeof IntersectionObserver !== 'undefined' && !listLookupObserver) {
+        listLookupObserver = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            const card = entry.target;
+            listLookupObserver.unobserve(card);
+            const button = card.querySelector('.jf-rank-play');
+            const code = card.dataset.jfRankCode || '';
+            const norm = normalizeCode(code);
+            const activeServers = getActiveServers();
+            if (!button || !code || !activeServers.length) return;
+            // Index/cache hits are synchronous; only unresolved visible cards reach this API queue.
+            const key = activeServers.map(function (s) { return s.id; }).join(',') + '|' + norm;
+            const known = listLookupResults.get(key);
+            if (known) { updateListPlayButton(button, known, activeServers[0], code); return; }
+            queueListLibraryLookup(code, activeServers).then(function (hit) {
+              if (button.isConnected) updateListPlayButton(button, hit, activeServers[0], code);
+            });
+          });
+        }, { rootMargin: '500px 0px' });
       }
-      if (!idxMaps.length) return;
-      const items = document.querySelectorAll('.movie-list .item, .emby-row .item');
       items.forEach(function (it) {
-        if (it.dataset.jfLibScanned === '1') return;
-        it.dataset.jfLibScanned = '1';
         const titleEl = it.querySelector('.video-title strong, .video-title');
-        if (!titleEl) return;
-        const code = extractCodeFromText((titleEl.textContent || '').trim());
+        const code = it.dataset.code || extractCodeFromText((titleEl && titleEl.textContent || '').trim());
         if (!code) return;
         const norm = normalizeCode(code);
         const hits = [];
-        idxMaps.forEach(function (im) {
-          if (im.entries[norm]) hits.push({ s: im.s, e: im.entries[norm] });
+        const codeAliases = buildTryCodes(code).map(normalizeCode);
+        const compactNorm = norm.replace(/[-_]/g, '');
+        servers.forEach(function (s) {
+          const im = getListIndexLookup(s);
+          let entry = im.entries[norm];
+          if (!entry) {
+            for (const alias of codeAliases) {
+              if (im.entries[alias]) { entry = im.entries[alias]; break; }
+            }
+          }
+          if (!entry) entry = im.compactEntries[compactNorm];
+          if (entry) hits.push({ s: s, e: { id: entry.id || entry.Id, sid: entry.sid || entry.ServerId || '' } });
+          if (!entry) {
+            const cached = getListCacheLookup(s)[norm];
+            if (cached && cached.ts && Date.now() - cached.ts < CACHE_TTL && cached.id) {
+              hits.push({ s: s, e: { id: cached.id, sid: cached.sid || '' } });
+            }
+          }
         });
-        if (!hits.length) return;
+        const cover = it.querySelector('.cover');
+        if (!cover) return;
+        cover.style.position = 'relative';
+        let actions = cover.querySelector(':scope > .jf-rank-actions');
+        if ((showPreview || (showLibrary && servers.length)) && !actions) {
+          actions = document.createElement('div');
+          actions.className = 'jf-rank-actions';
+          cover.appendChild(actions);
+        }
+        if (showPreview && actions) {
+          if (!actions.querySelector('.jf-rank-trailer')) {
+            const preview = document.createElement('button');
+            preview.type = 'button';
+            preview.className = 'jf-rank-action jf-rank-trailer';
+            preview.textContent = '▶ 预览片';
+            preview.title = code + ' · 解析预告片';
+            preview.addEventListener('click', function (e) {
+              e.preventDefault(); e.stopPropagation();
+              openTrailerPlayer(code);
+            });
+            actions.appendChild(preview);
+          }
+        }
+        let play = actions && actions.querySelector('.jf-rank-play');
+        if (showLibrary && servers.length && actions) {
+          if (!play) {
+            play = document.createElement('button');
+            play.type = 'button';
+            play.className = 'jf-rank-action jf-rank-play';
+            actions.appendChild(play);
+          }
+          it.dataset.jfRankCode = code;
+          updateListPlayButton(play, hits[0] || null, servers[0], code);
+          if (!hits.length && listLookupObserver) listLookupObserver.observe(it);
+        }
+        if (!showLibraryBadge || !hits.length) return;
         const box = it.querySelector('a.box') || it.querySelector('.box') || it;
         if (!box || box.querySelector('.jf-lib-badge')) return;
         const badge = document.createElement('a');
@@ -26744,12 +27015,15 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
           html +=
             '<div class="jf-srv-card" data-idx="' + i + '">' +
               '<div class="jf-srv-head">' +
-                '<span class="jf-srv-type jf-badge-' + s.type + '">' + (s.type === 'jellyfin' ? 'Jellyfin' : 'Emby') + '</span>' +
+                '<select class="jf-inp jf-srv-type" title="服务器类型" style="width:auto;margin-bottom:0;padding:5px 10px;">' +
+                  '<option value="emby"' + (s.type === 'emby' ? ' selected' : '') + '>Emby</option>' +
+                  '<option value="jellyfin"' + (s.type === 'jellyfin' ? ' selected' : '') + '>Jellyfin</option>' +
+                '</select>' +
                 '<input class="jf-inp jf-srv-name" type="text" placeholder="服务器名称（如 家里 Emby）" value="' + escapeAttr(s.name) + '" style="flex:1;margin-bottom:0;padding:5px 10px;">' +
                 '<label class="jf-srv-enabled"><input type="checkbox" class="jf-srv-enable" ' + (s.enabled ? 'checked' : '') + '> 启用</label>' +
               '</div>' +
               '<input class="jf-inp jf-srv-url" type="text" placeholder="服务器地址，如 https://emby.example.com:8096" value="' + escapeAttr(s.baseUrl) + '">' +
-              '<input class="jf-inp jf-srv-key" type="text" placeholder="API Key" value="' + escapeAttr(s.apiKey) + '">' +
+              '<input class="jf-inp jf-srv-key" type="password" autocomplete="new-password" placeholder="API Key" value="' + escapeAttr(s.apiKey) + '">' +
               '<div class="jf-srv-row">' +
                 '<select class="jf-inp jf-srv-mode" title="未入库时的跳转方式">' +
                   '<option value="direct"' + (s.jumpMode === 'direct' ? ' selected' : '') + '>未入库跳搜索页</option>' +
@@ -26771,7 +27045,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         body.innerHTML = html;
         body.querySelector('#jfSrvAdd').addEventListener('click', function () {
           const list = getServers();
-          list.push({ id: 'srv_' + Date.now(), name: '', type: 'emby', baseUrl: '', apiKey: '', jumpMode: 'direct', customTemplate: '', enabled: true });
+          list.push({ id: 'srv_' + Date.now(), name: '', type: 'jellyfin', baseUrl: '', apiKey: '', jumpMode: 'direct', customTemplate: '', enabled: true });
           saveServers(list);
           renderMediaTab();
         });
@@ -26783,6 +27057,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
             mut(list[i]);
             saveServers(list);
           };
+          card.querySelector('.jf-srv-type').addEventListener('change', function (e) { persist(function (s) { s.type = e.target.value === 'jellyfin' ? 'jellyfin' : 'emby'; }); });
           card.querySelector('.jf-srv-name').addEventListener('change', function (e) { persist(function (s) { s.name = e.target.value.trim(); }); });
           card.querySelector('.jf-srv-url').addEventListener('change', function (e) { persist(function (s) { s.baseUrl = e.target.value.trim(); }); });
           card.querySelector('.jf-srv-key').addEventListener('change', function (e) { persist(function (s) { s.apiKey = e.target.value.trim(); }); });
@@ -26807,6 +27082,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
             msg.className = 'jf-srv-msg';
             const cur = get();
             persist(function (s) {
+              s.type = card.querySelector('.jf-srv-type').value === 'jellyfin' ? 'jellyfin' : 'emby';
               s.baseUrl = card.querySelector('.jf-srv-url').value.trim();
               s.apiKey = card.querySelector('.jf-srv-key').value.trim();
             });
@@ -26817,7 +27093,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
             }
             try {
               const r = await testServer(get());
-              if (r.ok) persist(function (s) { s.version = r.version || ''; });
+              if (r.ok) persist(function (s) { s.version = r.version || ''; s.serverId = r.serverId || s.serverId || ''; });
               msg.textContent = r.ok ? ('✅ ' + (r.name ? r.name + ' · ' : '') + (r.version || '连接成功')) : ('❌ ' + (r.error || '连接失败'));
               msg.className = 'jf-srv-msg ' + (r.ok ? 'ok' : 'err');
             } catch (e) {
@@ -26830,6 +27106,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
             msg.textContent = '索引同步中…';
             msg.className = 'jf-srv-msg';
             persist(function (s) {
+              s.type = card.querySelector('.jf-srv-type').value === 'jellyfin' ? 'jellyfin' : 'emby';
               s.baseUrl = card.querySelector('.jf-srv-url').value.trim();
               s.apiKey = card.querySelector('.jf-srv-key').value.trim();
             });
@@ -26846,6 +27123,7 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
               msg.className = 'jf-srv-msg ok';
               const idxEl = card.querySelector('.jf-srv-idx');
               if (idxEl) idxEl.textContent = '索引 ' + n + ' 条 · 刚刚';
+              if (/^\/rankings\/movies(?:\/|$)/.test(location.pathname)) injectListBadges();
             } catch (e) {
               msg.textContent = '❌ 同步失败：' + (e && e.message || '');
               msg.className = 'jf-srv-msg err';
@@ -26957,6 +27235,14 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
         /* 列表页角标 */
         '.jf-lib-badge{position:absolute;top:5px;right:5px;z-index:6;width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;background:rgba(20,30,20,.78);color:#7ee787;border:1px solid rgba(76,175,80,.55);box-shadow:0 2px 6px rgba(0,0,0,.4);backdrop-filter:blur(4px);cursor:pointer;transition:all .18s ease;}',
         '.jf-lib-badge:hover{background:rgba(52,206,87,.9);color:#04140a;transform:scale(1.12);}',
+        '.jf-rank-actions{position:absolute;z-index:8;left:7px;right:7px;bottom:7px;display:flex;gap:6px;flex-wrap:nowrap;box-sizing:border-box;padding:16px 0 0;background:linear-gradient(180deg,transparent,rgba(10,14,20,.42));}',
+        '.jf-rank-action{display:inline-flex;flex:1 1 0;align-items:center;justify-content:center;min-width:0;min-height:32px;box-sizing:border-box;padding:5px 6px;border:1px solid rgba(255,255,255,.28);border-radius:9px;background:rgba(255,255,255,.17);color:#fff!important;text-decoration:none!important;white-space:nowrap;font:600 11px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;backdrop-filter:blur(12px) saturate(1.2);-webkit-backdrop-filter:blur(12px) saturate(1.2);box-shadow:0 3px 10px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.12);transition:background .18s ease,border-color .18s ease,transform .18s ease,box-shadow .18s ease;}',
+        '.jf-rank-action:hover{background:rgba(255,255,255,.26);border-color:rgba(255,255,255,.42);transform:translateY(-1px);box-shadow:0 5px 14px rgba(0,0,0,.2),inset 0 1px 0 rgba(255,255,255,.2);}',
+        '.jf-rank-action:focus-visible{outline:2px solid rgba(255,255,255,.82);outline-offset:2px;}',
+        '.jf-rank-trailer{background:rgba(191,219,254,.28);border-color:rgba(219,234,254,.48);}',
+        '.jf-rank-play{background:rgba(255,255,255,.17);border-color:rgba(255,255,255,.28);}',
+        '.jf-rank-play.jf-lib-play-jellyfin{background:rgba(221,214,254,.3);border-color:rgba(237,233,254,.5);}',
+        '.jf-rank-play.jf-lib-play-emby{background:rgba(187,247,208,.28);border-color:rgba(220,252,231,.48);}',
         /* 封面悬浮预告片按钮（Emby 海报行为：hover 浮现） */
         '#emby-detail-hero .poster-wrap{position:relative;}',
         '.jf-poster-play{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;border:none;outline:none;cursor:pointer;background:linear-gradient(to bottom,rgba(0,0,0,0) 30%,rgba(0,0,0,.55) 100%);color:#fff;opacity:0;transition:opacity .22s ease;}',
@@ -27145,15 +27431,45 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
     function startObserver() {
       if (observer) return;
       const schedule = debounce(fullScan, 350);
-      observer = new MutationObserver(function (muts) {
-        // 忽略 FUSION 自身注入引起的变更，避免自激循环
+      const ownUiSelector = '.jf-trailer-overlay, .jf-whatslink-overlay, .jf-set-mask, .jf-mag-toast, .jf-mag-btn-group, .jf-lib-chips, .jf-poster-play, .jf-circle-btn, .jf-lib-badge, .jf-rank-actions, .jf-rank-action, .emby-card-shine';
+      function isRelevant(muts) {
+        const detail = isDetailPage();
         for (let i = 0; i < muts.length; i++) {
-          const t = muts[i].target;
-          if (t && t.nodeType === 1 && t.closest &&
-              t.closest('.jf-trailer-overlay, .jf-whatslink-overlay, .jf-set-mask, .jf-mag-toast, .jf-mag-btn-group, .jf-lib-chips, .jf-poster-play, .jf-circle-btn, .jf-lib-badge')) {
-            return;
+          const m = muts[i];
+          let target = m.target;
+          if (target && target.nodeType === 3) target = target.parentElement;
+          const added = m.addedNodes || [];
+          if (added.length) {
+            let onlyOwnNodes = true;
+            for (let j = 0; j < added.length; j++) {
+              const n = added[j];
+              if (n.nodeType !== 1 || !(n.matches && n.matches(ownUiSelector)) && !(n.closest && n.closest(ownUiSelector))) {
+                onlyOwnNodes = false;
+                break;
+              }
+            }
+            if (onlyOwnNodes) continue;
+          }
+          if (target && target.nodeType === 1) {
+            if ((target.closest && target.closest(ownUiSelector)) || (detail && target.closest && target.closest('#emby-detail-root'))) continue;
+            if (detail && target.closest && target.closest('.video-detail')) return true;
+            if (!detail && target.closest && target.closest('.movie-list, .emby-row')) return true;
+          }
+          for (let j = 0; j < added.length; j++) {
+            const n = added[j];
+            if (!n || n.nodeType !== 1 || (n.matches && n.matches(ownUiSelector))) continue;
+            if (detail) {
+              if ((n.matches && n.matches('.video-detail, #emby-detail-root, #magnets-content, #magnet-table, #jav-nong-table, #nong-table-new')) ||
+                  (n.querySelector && n.querySelector('.video-detail, #emby-detail-root, #magnets-content, #magnet-table, #jav-nong-table, #nong-table-new'))) return true;
+            } else if ((n.matches && n.matches('.movie-list, .emby-row, .movie-list .item, .emby-row .item')) ||
+                       (n.querySelector && n.querySelector('.movie-list, .emby-row'))) return true;
           }
         }
+        return false;
+      }
+      observer = new MutationObserver(function (muts) {
+        // 只对媒体库/详情页原生内容变更重新扫描；脚本 UI 与无关页面 DOM 变化直接略过。
+        if (!isRelevant(muts)) return;
         schedule();
       });
       observer.observe(document.body, { childList: true, subtree: true });
@@ -27162,13 +27478,11 @@ html.emby-skin.emby-style-liquid .cover-modal-base {
       if (window.__jfFusionInited) return;
       window.__jfFusionInited = true;
       registerPlugins();
+      window.__javdbFusionScanListBadges = injectListBadges;
       ensureFusionStyle();
       GM_registerMenuCommand('🎬 融合扩展设置（媒体库/预告片/磁力工具）', function () { openFusionSettings(); });
-      // 首屏多时点扫描（皮肤详情页构建时序不固定）
+      // 首次扫描后由相关 DOM 变更观察器接管，无需多轮全页轮询。
       fullScan();
-      setTimeout(fullScan, 600);
-      setTimeout(fullScan, 1600);
-      setTimeout(fullScan, 3200);
       startObserver();
       flog('融合模块已加载（媒体库跳转 / 预告片 / 磁力工具箱）');
     }
