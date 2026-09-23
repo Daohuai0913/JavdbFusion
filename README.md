@@ -13,7 +13,7 @@ JavdbFusion 是面向 JAVDB 的 Tampermonkey 用户脚本，融合 Emby 风格�
 ## 安装
 
 1. 在 Chrome、Edge 或 Firefox 安装 Tampermonkey。
-2. 从项目的 **Releases** 下载 `JavdbFusion.user.js`，或打开项目中的脚本文件并选择由 Tampermonkey 安装。
+2. 从 [SleazyFork 安装](https://sleazyfork.org/zh-CN/scripts/597029-javdbembyskin-x-fusion-emby-jellyfin-jump-trailer-magnet-suite)，或打开 [GitHub 脚本文件](https://github.com/Daohuai0913/JavdbFusion/blob/main/JavdbFusion.user.js)，点击 Raw 后按提示安装。
 3. 安装后访问 JAVDB，打开脚本设置并按需启用功能。
 
 > 如果同时启用了另一款会重做 JAVDB 页面样式的用户脚本，可能出现界面冲突；遇到问题时请先停用重复的皮肤脚本。
